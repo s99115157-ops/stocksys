@@ -5,3 +5,7 @@ mplfinance
 numpy
 matplotlib
 scipy
+requests
+twstock
+pytz
+lxml
