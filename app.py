@@ -5,29 +5,21 @@ import mplfinance as mpf
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import argrelextrema
+from scipy.stats import linregress
 import warnings
 from datetime import datetime, timedelta
-import requests
 import urllib3
 
-# --- 基本設定 ---
+# --- 環境設定 ---
 st.set_page_config(page_title="AI 股市指揮中心", layout="wide")
 warnings.filterwarnings("ignore")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 解決中文亂碼 (Streamlit Cloud 需載入字體，這裡預設使用支援的中文字體名稱)
-plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial Unicode MS', 'sans-serif']
-plt.rcParams['axes.unicode_minus'] = False
+# 設定繪圖字體 (網頁環境通常使用 DejaVu Sans)
+plt.rcParams['axes.unicode_minus'] = False 
 
-# --- 資料下載與計算核心 (從原始碼移植) ---
-@st.cache_data(ttl=3600)
-def fetch_stock_data(symbol, period="6mo", interval="1d"):
-    df = yf.download(symbol, period=period, interval=interval, progress=False)
-    if df.empty: return None
-    if isinstance(df.columns, pd.MultiIndex): 
-        df.columns = df.columns.get_level_values(0)
-    
-    # 計算指標 (KD, MA, Bollinger)
+# --- 核心邏輯移植 ---
+def calculate_indicators(df):
     close = df['Close']
     df['MA5'] = close.rolling(5).mean()
     df['MA20'] = close.rolling(20).mean()
@@ -45,59 +37,67 @@ def fetch_stock_data(symbol, period="6mo", interval="1d"):
     df['BB_Up'] = df['MA20'] + 2 * std
     df['BB_Low'] = df['MA20'] - 2 * std
     
-    # 買賣訊號邏輯 (簡化移植)
-    df['Buy'] = np.where((df['K'] < 30) & (df['K'] > df['D']) & (df['K'].shift(1) <= df['D'].shift(1)), df['Low'] * 0.98, np.nan)
-    df['Sell'] = np.where((df['K'] > 70) & (df['K'] < df['D']) & (df['K'].shift(1) >= df['D'].shift(1)), df['High'] * 1.02, np.nan)
-    
+    # 買賣訊號 (黃箭頭/紫箭頭邏輯)
+    df['Buy_Sig'] = np.where((df['K'] < 30) & (df['K'] > df['D']) & (df['K'].shift(1) <= df['D'].shift(1)), df['Low'] * 0.97, np.nan)
+    df['Sell_Sig'] = np.where((df['K'] > 70) & (df['K'] < df['D']) & (df['K'].shift(1) >= df['D'].shift(1)), df['High'] * 1.03, np.nan)
     return df
 
-# --- UI 介面設計 ---
-st.sidebar.title("📈 參數設定")
-stock_id = st.sidebar.text_input("輸入股票代碼 (例: 2330.TW)", value="2330.TW")
-time_range = st.sidebar.selectbox("時段", ["6mo", "1y", "1mo", "5d"], index=0)
-interval = st.sidebar.selectbox("頻率", ["1d", "60m", "30m", "1wk"], index=0)
+# --- UI 介面 ---
+st.title("📈 智慧股市分析系統 (網頁版)")
+st.markdown("支援 Mac / iPhone 隨時查看分析結果")
+
+# 側邊欄控制
+st.sidebar.header("查詢參數")
+target_stock = st.sidebar.text_input("股票代碼 (例: 2330.TW)", value="2330.TW")
+period = st.sidebar.selectbox("觀測區間", ["6mo", "1y", "3mo", "5y"], index=0)
 
 if st.sidebar.button("開始分析"):
-    with st.spinner('正在分析數據...'):
-        df = fetch_stock_data(stock_id, time_range, interval)
+    with st.spinner('數據計算中...'):
+        # 下載數據
+        df = yf.download(target_stock, period=period, interval="1d", progress=False)
         
-        if df is not None:
-            # 建立圖表
+        if not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            
+            df = calculate_indicators(df)
+            
+            # 準備繪圖
             apds = [
-                mpf.make_addplot(df['MA5'], color='orange', width=0.7),
-                mpf.make_addplot(df['MA20'], color='blue', width=0.7),
-                mpf.make_addplot(df['MA60'], color='green', width=0.7),
-                mpf.make_addplot(df['Buy'], type='scatter', markersize=100, marker='^', color='red'),
-                mpf.make_addplot(df['Sell'], type='scatter', markersize=100, marker='v', color='lime')
+                mpf.make_addplot(df['MA5'], color='#FF9900', width=0.8),
+                mpf.make_addplot(df['MA20'], color='#0066FF', width=0.8),
+                mpf.make_addplot(df['MA60'], color='#00FF00', width=0.8),
+                mpf.make_addplot(df['BB_Up'], color='gray', linestyle='--', alpha=0.3),
+                mpf.make_addplot(df['BB_Low'], color='gray', linestyle='--', alpha=0.3),
+                mpf.make_addplot(df['Buy_Sig'], type='scatter', markersize=120, marker='^', color='yellow'),
+                mpf.make_addplot(df['Sell_Sig'], type='scatter', markersize=120, marker='v', color='purple')
             ]
             
-            fig, axlist = mpf.plot(df, type='candle', style='charles', 
-                                   addplot=apds, returnfig=True, 
-                                   figsize=(12, 8), volume=True,
-                                   title=f"\nStock: {stock_id}")
+            # 顯示看板資訊
+            last_price = df['Close'].iloc[-1]
+            last_k = df['K'].iloc[-1]
+            last_d = df['D'].iloc[-1]
             
-            # 顯示資訊欄位
-            col1, col2, col3 = st.columns(3)
-            latest = df.iloc[-1]
-            col1.metric("當前價格", f"{latest['Close']:.2f}")
-            col2.metric("K / D 值", f"{latest['K']:.1f} / {latest['D']:.1f}")
-            col3.metric("MA20 趨勢", "↑ 偏多" if latest['Close'] > latest['MA20'] else "↓ 偏空")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("當前股價", f"{last_price:.2f}")
+            m2.metric("KD 指標", f"K:{last_k:.1f} / D:{last_d:.1f}")
+            m3.metric("趨勢", "多頭" if last_price > df['MA20'].iloc[-1] else "空頭")
+
+            # 繪圖
+            fig, axlist = mpf.plot(df, type='candle', style='charles',
+                                 addplot=apds, volume=True, returnfig=True,
+                                 figsize=(12, 7), panel_ratios=(6,2),
+                                 title=f"\nStock: {target_stock} Analysis")
             
-            # 渲染圖表
             st.pyplot(fig)
             
-            # 顯示說明
-            st.markdown("""
-            ### 💡 圖例說明
-            * **紅箭頭 (^)**：KD 低檔金叉買進訊號
-            * **綠箭頭 (v)**：KD 高檔死叉賣出訊號
-            * **線條**：橘(MA5), 藍(MA20), 綠(MA60)
-            """)
+            # 圖例說明
+            with st.expander("💡 查看指標圖例"):
+                st.write("""
+                - **黃色箭頭 (^)**：KD 低檔金叉 (買進參考)
+                - **紫色箭頭 (v)**：KD 高檔死叉 (賣出參考)
+                - **灰虛線**：布林通道上下軌
+                - **線條**：橘色(MA5), 藍色(MA20), 綠色(MA60)
+                """)
         else:
-            st.error("找不到該股票代碼，請確認後綴是否正確 (如 .TW 或 .TWO)")
-
-# 智能選股區塊 (移植原本的 SmartScreener 概念)
-with st.expander("🔍 快速選股掃描"):
-    if st.button("啟動 AI 強勢股掃描"):
-        st.write("掃描功能運行中... (範例顯示)")
-        # 這裡可以放置你原本 ThreadPoolExecutor 的邏輯
+            st.error("讀取失敗，請確認代碼是否正確。")
